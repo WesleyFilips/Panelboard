@@ -138,7 +138,7 @@ label.chk{display:flex;gap:6px;align-items:center;color:var(--muted)}
       <button class="btn" data-tool="select" title="Select and move (V)"><svg viewBox="0 0 24 24"><path d="M5 3l13 8-6 1.5L9.5 19z"/></svg>Select</button>
       <button class="btn" data-tool="pan" title="Pan (H, or hold Space)"><svg viewBox="0 0 24 24"><path d="M12 3v18M3 12h18M12 3l-3 3M12 3l3 3M12 21l-3-3M12 21l3-3M3 12l3-3M3 12l3 3M21 12l-3-3M21 12l-3 3"/></svg>Pan</button>
       <button class="btn" data-tool="wire" title="Draw wire (W)"><svg viewBox="0 0 24 24"><path d="M5 18h6V7h8"/><circle cx="4.5" cy="18" r="1.8"/><circle cx="19.5" cy="7" r="1.8"/></svg>Wire</button>
-      <button class="btn" data-tool="homerun" title="Mark a homerun ring on a box (R)"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><circle cx="12" cy="12" r="8.5"/></svg>Homerun</button>
+      <button class="btn" data-tool="homerun" title="Mark a device as the homerun for its circuit (R)"><svg viewBox="0 0 24 24"><path d="M3 11l9-7 9 7M5.5 9.5V20h13V9.5"/></svg>Homerun</button>
     </div>
     <div class="group" role="toolbar" aria-label="Stamps" id="stamps"></div>
     <button class="btn solid" id="newStamp"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>New stamp</button>
@@ -165,6 +165,12 @@ label.chk{display:flex;gap:6px;align-items:center;color:var(--muted)}
       <span class="gl">Shape</span>
       <button class="btn sm" data-ws="straight">Straight</button>
       <button class="btn sm" data-ws="arc">Arc</button>
+    </div>
+    <div class="group" role="group" aria-label="Device border">
+      <span class="gl">Border</span>
+      <button class="btn sm" data-bd="round">Round</button>
+      <button class="btn sm" data-bd="rect">Rectangle</button>
+      <button class="btn sm" data-bd="none">None</button>
     </div>
     <button class="btn solid" id="numTog" title="Show circuit numbers at the bottom left of each device">Circuit #</button>
     <div class="group">
@@ -255,7 +261,7 @@ const BUILTIN=[
   {id:'light',label:'Light fixture',kind:'builtin',color:'#e8a200',subs:[{id:'recessed',name:'Recessed',tag:'R'},{id:'fan',name:'Ceiling fan',tag:'FAN'},{id:'sconce',name:'Wall sconce',tag:'W'}]}
 ];
 const cloneB=b=>JSON.parse(JSON.stringify(b));
-const DEF_OPTS={devColor:'circuit',wireColor:'circuit',numbers:true,arc:false};
+const DEF_OPTS={devColor:'circuit',wireColor:'circuit',numbers:true,arc:false,border:'round'};
 
 function el(tag,props={},...kids){
   const e=document.createElement(tag);
@@ -288,6 +294,11 @@ function migrate(){
       d.items=[{id:nid(),stamp:d.stamp,sub:d.sub===undefined?null:d.sub,circuit:d.circuit===undefined?null:d.circuit}];
       delete d.stamp;delete d.sub;delete d.circuit;
     }
+    if(d.homeruns){
+      /* older plans marked homeruns on the box by circuit; move each mark onto the first device on that circuit */
+      d.homeruns.forEach(cid=>{const it=d.items.find(i=>i.circuit===cid);if(it)it.homerun=true;});
+      delete d.homeruns;
+    }
   });
 }
 const view={x:0,y:0,k:1,fit:1};
@@ -305,7 +316,7 @@ function restore(j){
   Object.assign(S,JSON.parse(j));
   ui.sel=null;ui.draft=null;
   if(ui.active&&!circ(ui.active))ui.active=null;
-  if(ui.hl&&!stamp(ui.hl.s))ui.hl=null;
+  if(ui.hl&&ui.hl.s!=='@home'&&!stamp(ui.hl.s))ui.hl=null;
   if(!stamp(ui.stampId))ui.stampId=S.stamps[0].id;
   loadStampImgs();
 }
@@ -348,6 +359,17 @@ function drawSymbol(c,st,x,y,r,col){
     const im=stampImgs[st.id];
     if(im&&im.complete&&im.naturalWidth){const s=r*1.55,src=col===INK?im:(tinted(st,col)||im);c.drawImage(src,x-s/2,y-s/2,s,s);}
   }
+}
+/* little house marking a device as the homerun for its circuit; s is the half size */
+function house(c,x,y,s,fill){
+  c.save();
+  c.beginPath();
+  c.moveTo(x,y-s);c.lineTo(x+s,y-s*.1);c.lineTo(x+s*.72,y-s*.1);c.lineTo(x+s*.72,y+s*.85);
+  c.lineTo(x-s*.72,y+s*.85);c.lineTo(x-s*.72,y-s*.1);c.lineTo(x-s,y-s*.1);c.closePath();
+  c.lineJoin='round';c.lineWidth=s*.28;c.strokeStyle='#ffffff';c.stroke();
+  c.fillStyle=fill;c.fill();
+  c.fillStyle='#ffffff';c.fillRect(x-s*.2,y+s*.22,s*.4,s*.63);
+  c.restore();
 }
 function pill(c,x,y,cc,r,fill){
   const br=r*.46,txt=String(cc.num);
@@ -418,17 +440,22 @@ function boxSub(it){
 function boxLayout(d,r){
   const n=d.items.length,cells=[];let W=0;
   d.items.forEach(it=>{
-    const sb=boxSub(it);
-    const tagW=n>1&&sb&&sb.tag?sb.tag.length*.31*r:0;
-    const w=n>1?Math.max(2.1*r,tagW+1.1*r):2.1*r;
-    cells.push({it,sb,w,left:W});W+=w;
+    /* Every device in a box gets the same fixed width, so label text never changes the geometry. */
+    const sb=boxSub(it),hl=1.05*r;
+    cells.push({it,sb,w:2*hl,hl,left:W});W+=2*hl;
   });
   const x0=d.x-W/2;
-  cells.forEach(k=>{k.left+=x0;k.cx=k.left+k.w/2;});
+  cells.forEach(k=>{k.left+=x0;k.cx=k.left+k.hl;});
   return{W,H:2.1*r,cells,multi:n>1};
 }
 function stadium(c,x,y,W,H,pad){
   const hh=H/2+pad,w2=W/2+pad;
+  if(S.opts.border==='rect'){
+    const cr=Math.min(hh,H*.14+pad*.5),l=x-w2,rt=x+w2,t=y-hh,b=y+hh;
+    c.beginPath();c.moveTo(l+cr,t);c.lineTo(rt-cr,t);c.arcTo(rt,t,rt,t+cr,cr);c.lineTo(rt,b-cr);c.arcTo(rt,b,rt-cr,b,cr);
+    c.lineTo(l+cr,b);c.arcTo(l,b,l,b-cr,cr);c.lineTo(l,t+cr);c.arcTo(l,t,l+cr,t,cr);c.closePath();
+    return;
+  }
   c.beginPath();
   c.moveTo(x-w2+hh,y-hh);c.lineTo(x+w2-hh,y-hh);
   c.arc(x+w2-hh,y,hh,-Math.PI/2,Math.PI/2);
@@ -442,8 +469,8 @@ function drawDevice(c,d,o,C,ghost){
   const hc=o.live&&ui.hlCirc&&ui.active!=null?ui.active:null;
   const hl=o.live&&(ui.hl||hc!=null);
   const match=hc!=null
-    ?(d.items.some(it=>it.circuit===hc)||(d.homeruns||[]).includes(hc))
-    :(!!o.live&&!!ui.hl&&d.items.some(it=>it.stamp===ui.hl.s&&(ui.hl.sub==null||ui.hl.sub===(it.sub||''))));
+    ?d.items.some(it=>it.circuit===hc)
+    :(!!o.live&&!!ui.hl&&d.items.some(hlMatch));
   c.save();
   const a=ghost?.6:(hl&&!match?.2:1);
   if(match){
@@ -460,7 +487,7 @@ function drawDevice(c,d,o,C,ghost){
   if(bc){c.strokeStyle=bc;c.lineWidth=r*.2;}
   else if(L.multi){c.strokeStyle='rgba(17,24,39,.55)';c.lineWidth=r*.1;}
   else{c.strokeStyle='rgba(17,24,39,.35)';c.lineWidth=r*.06;}
-  stadium(c,d.x,d.y,L.W,L.H,0);c.stroke();
+  if(S.opts.border!=='none'){stadium(c,d.x,d.y,L.W,L.H,0);c.stroke();}
   if(L.multi){
     c.strokeStyle='rgba(17,24,39,.3)';c.lineWidth=r*.05;
     L.cells.slice(1).forEach(k=>{c.beginPath();c.moveTo(k.left,d.y-r*.7);c.lineTo(k.left,d.y+r*.7);c.stroke();});
@@ -469,22 +496,18 @@ function drawDevice(c,d,o,C,ghost){
     const it=k.it,st=stamp(it.stamp),cc=circ(it.circuit);
     if(!st)return;
     drawSymbol(c,st,k.cx,d.y,r,cols[i]||INK);
-    if(cc&&S.opts.numbers)pill(c,k.left+(L.multi?.3*r:.19*r),d.y+r*.86,cc,r,(dc==='circuit'||wc)?cc.color:INK);
-    if(k.sb&&k.sb.tag){
-      c.font='700 '+(r*(L.multi?.5:.62))+'px '+MONO;c.textBaseline='middle';c.lineJoin='round';
-      let tx,ty;
-      if(L.multi){c.textAlign='right';tx=k.left+k.w-.12*r;ty=d.y+r*.88;}
-      else{c.textAlign='left';tx=k.cx+r*.5;ty=d.y+r*1.12;}
-      c.lineWidth=r*.26;c.strokeStyle='#ffffff';c.strokeText(k.sb.tag,tx,ty);
-      c.fillStyle='#111827';c.fillText(k.sb.tag,tx,ty);
+    c.font='700 '+(r*.56)+'px '+MONO;c.textBaseline='middle';c.lineJoin='round';c.lineWidth=r*.24;c.strokeStyle='#ffffff';
+    const ty=d.y+r*.78;
+    if(cc&&S.opts.numbers){
+      const num=String(cc.num);
+      c.textAlign='right';c.strokeText(num,k.cx-r*.35,ty);
+      c.fillStyle=(dc==='circuit'||wc)?cc.color:INK;c.fillText(num,k.cx-r*.35,ty);
     }
-  });
-  /* homerun rings: one extra ring per circuit whose feed arrives at this box */
-  (d.homeruns||[]).forEach((cid,i)=>{
-    const cc=circ(cid);if(!cc)return;
-    const pad=r*(.3+.3*i);
-    c.strokeStyle=cc.color;c.lineWidth=r*.12;stadium(c,d.x,d.y,L.W,L.H,pad);c.stroke();
-    if(S.opts.numbers)pill(c,d.x,d.y-L.H/2-pad,cc,r*.8,cc.color);
+    if(it.homerun&&cc)house(c,k.left+(L.multi?.3*r:.19*r),d.y-r*.86,r*.5,cc.color);
+    if(k.sb&&k.sb.tag){
+      c.textAlign='left';c.strokeText(k.sb.tag,k.cx+r*.35,ty);
+      c.fillStyle=INK;c.fillText(k.sb.tag,k.cx+r*.35,ty);
+    }
   });
   if(o.live&&selDev(d.id)){
     c.globalAlpha=1;c.strokeStyle=C.accent;c.lineWidth=r*.13;c.setLineDash([r*.32,r*.22]);
@@ -505,9 +528,9 @@ function renderScene(c,o,C){
     if(ui.hover&&(ui.tool==='wire'||ui.tool==='stamp'||ui.tool==='homerun')){
       const d=S.devices.find(q=>q.id===ui.hover);
       if(d&&d.items){
-        const L=boxLayout(d,R()),k=ui.tool==='wire'&&L.multi?L.cells.find(q=>q.it.id===ui.hoverItem):null;
+        const L=boxLayout(d,R()),k=(ui.tool==='wire'||ui.tool==='homerun')&&L.multi?L.cells.find(q=>q.it.id===ui.hoverItem):null;
         c.save();c.strokeStyle=C.accent;c.lineWidth=R()*.16;
-        if(k)stadium(c,k.cx,d.y,k.w,L.H,R()*.2);else stadium(c,d.x,d.y,L.W,L.H,R()*.45);
+        if(k)stadium(c,k.left+k.w/2,d.y,k.w,L.H,R()*.2);else stadium(c,d.x,d.y,L.W,L.H,R()*.45);
         c.stroke();c.restore();
       }
     }
@@ -609,6 +632,13 @@ function selParts(){
   if(s.t==='wire')return{devs:[],wires:[s.id]};
   return{devs:s.devs.slice(),wires:s.wires.slice()};
 }
+/* does a device match the active device highlight (a type, a variant, standard devices, or homeruns)? */
+function hlMatch(it){
+  const h=ui.hl;
+  if(!h)return false;
+  if(h.s==='@home')return !!it.homerun;
+  return it.stamp===h.s&&(h.sub==null||h.sub===(it.sub||''));
+}
 function selDev(id){const s=ui.sel;return !!s&&((s.t==='dev'&&s.id===id)||(s.t==='multi'&&s.devs.includes(id)));}
 function selWire(id){const s=ui.sel;return !!s&&((s.t==='wire'&&s.id===id)||(s.t==='multi'&&s.wires.includes(id)));}
 function toggleMulti(id){
@@ -658,11 +688,12 @@ function doClick(p,shift){
   let w=s2w(p);
   if(ui.tool==='homerun'){
     const hb=hitDevice(w);
-    if(!hb){toast('Click a device box to mark its homerun.');return;}
-    const cids=boxCircuits(hb);
-    if(!cids.length){toast('Put a device in this box on a circuit first.');return;}
+    if(!hb){toast('Click a device to mark it as a homerun.');return;}
+    const hit=hb.items.find(q=>q.id===hitItem(hb,w));
+    if(!hit)return;
+    if(hit.circuit==null||!circ(hit.circuit)){toast('Put this device on a circuit first.');return;}
     snap();
-    hb.homeruns=(hb.homeruns||[]).length?[]:[cids[0]];
+    hit.homerun=!hit.homerun;
     ui.sel={t:'dev',id:hb.id};
     refresh();return;
   }
@@ -756,7 +787,7 @@ cv.addEventListener('pointermove',e=>{
   ui.cur=w;
   const hdv=(ui.tool==='wire'||ui.tool==='stamp'||ui.tool==='homerun')?hitDevice(w):null;
   ui.hover=hdv?hdv.id:null;
-  ui.hoverItem=hdv&&ui.tool==='wire'?hitItem(hdv,w):null;
+  ui.hoverItem=hdv&&(ui.tool==='wire'||ui.tool==='homerun')?hitItem(hdv,w):null;
   if(drag){
     if(drag.t==='pan'){view.x=drag.vx+(p.x-drag.sx);view.y=drag.vy+(p.y-drag.sy);}
     else if(drag.t==='marq'){
@@ -827,6 +858,13 @@ addEventListener('keydown',e=>{
 addEventListener('keyup',e=>{if(e.key===' '){ui.space=false;cv.style.cursor=curFor();}});
 
 /* ---------- panels ---------- */
+function homeIcon(size=28){
+  const dpr=window.devicePixelRatio||1,c=el('canvas',{class:'chip'});
+  c.width=c.height=Math.round(size*dpr);c.style.width=c.style.height=size+'px';
+  const x=c.getContext('2d');x.scale(dpr,dpr);
+  house(x,size/2,size/2,size*.34,INK);
+  return c;
+}
 function stampIcon(st,size=28){
   const dpr=window.devicePixelRatio||1,c=el('canvas',{class:'chip'});
   c.width=c.height=Math.round(size*dpr);c.style.width=c.style.height=size+'px';
@@ -857,6 +895,7 @@ function renderToolbar(){
   document.querySelectorAll('[data-dc]').forEach(b=>b.setAttribute('aria-pressed',String(S.opts.devColor===b.dataset.dc)));
   document.querySelectorAll('[data-wc]').forEach(b=>b.setAttribute('aria-pressed',String(S.opts.wireColor===b.dataset.wc)));
   document.querySelectorAll('[data-ws]').forEach(b=>b.setAttribute('aria-pressed',String((S.opts.arc?'arc':'straight')===b.dataset.ws)));
+  document.querySelectorAll('[data-bd]').forEach(b=>b.setAttribute('aria-pressed',String(S.opts.border===b.dataset.bd)));
   $('#numTog').setAttribute('aria-pressed',String(S.opts.numbers));
   const pn=$('#planName');if(document.activeElement!==pn)pn.value=S.name||'';
   renderVariant();
@@ -882,7 +921,7 @@ function updHint(){
   let t;
   if(ui.tool==='stamp')t='Click the plan to place a '+(stamp(ui.stampId)||{label:'stamp'}).label.toLowerCase()+'. Click an existing device to add this one to its box. Esc to stop. '+cs+'.';
   else if(ui.tool==='wire')t=ui.draft?'Click empty space to bend. Click a device to finish this run and start the next from it. Double-click or Enter ends at a point. Right-click or Esc cancels. Shift keeps it square. '+cs+'.':'Click a device or any point to start a wire. In a multi-device box, click the specific device to wire. '+cs+'.';
-  else if(ui.tool==='homerun')t='Click a device box to add or remove its homerun ring. The ring uses the circuit of the first device in the box. Change it in the Selected panel.';
+  else if(ui.tool==='homerun')t='Click a device to mark or unmark it as the homerun for its circuit. A small house appears at its top left.';
   else if(ui.tool==='pan')t='Drag to pan. Scroll to zoom.';
   else t='Drag empty space to box-select. Drag a selected device to move the whole selection. Shift adds to it. Pan with the Pan tool or Space, zoom with scroll.';
   $('#hint').textContent=t;
@@ -898,11 +937,11 @@ function renderCircuits(){
   const mk=c=>{
     const id=c?c.id:null,on=ui.active===id;
     const dn=allItems().filter(d=>d.circuit===id).length,wn=S.wires.filter(w=>w.circuit===id).length;
-    const hasHome=!!c&&S.devices.some(d=>(d.homeruns||[]).includes(c.id));
+    const hasHome=!!c&&allItems().some(i=>i.circuit===c.id&&i.homerun);
     const flag=!!c&&dn>1&&!hasHome;
     const meta=el('div',{class:'meta'},
       el('span',{text:dn+' device'+(dn===1?'':'s')+' · '+wn+' wire'+(wn===1?'':'s')}),
-      flag?el('span',{class:'flag',title:'This circuit has more than one device but no homerun ring. Use the Homerun tool on the box where its feed arrives.',text:'No homerun'}):'',
+      flag?el('span',{class:'flag',title:'This circuit has more than one device but no homerun marked. Use the Homerun tool on the device where its feed arrives.',text:'No homerun'}):'',
       (on&&ui.hlCirc&&c)?el('span',{class:'hlbadge',text:'Highlighting'}):'');
     let kids;
     if(c){
@@ -911,8 +950,7 @@ function renderCircuits(){
       const name=el('input',{class:'field',value:c.name,placeholder:'Name (optional)','aria-label':'Circuit name',oninput:e=>{c.name=e.target.value;updHint();renderInspector();save();}});
       const del=el('button',{class:'x2','aria-label':'Delete circuit '+c.num,title:'Delete circuit (its items become unassigned)',onclick:()=>{
         snap();
-        allItems().forEach(d=>{if(d.circuit===c.id)d.circuit=null;});
-        S.devices.forEach(d=>{d.homeruns=(d.homeruns||[]).filter(x=>x!==c.id);});
+        allItems().forEach(d=>{if(d.circuit===c.id){d.circuit=null;d.homerun=false;}});
         S.wires.forEach(w=>{if(w.circuit===c.id)w.circuit=null;});
         S.circuits=S.circuits.filter(q=>q.id!==c.id);
         if(ui.active===c.id)ui.active=null;
@@ -947,30 +985,15 @@ function renderInspector(){
       el('button',{class:'btn sm solid',onclick:deleteSel},n>1?'Delete box':'Delete')));
     d.items.forEach(it=>{
       const st=stamp(it.stamp)||{label:'Device',subs:[]};
-      const cs=el('select',{class:'field','aria-label':'Circuit for '+st.label,onchange:e=>{snap();it.circuit=e.target.value===''?null:+e.target.value;refresh();}},el('option',{value:'',text:'No circuit'}),circOpts());
+      const cs=el('select',{class:'field','aria-label':'Circuit for '+st.label,onchange:e=>{snap();it.circuit=e.target.value===''?null:+e.target.value;if(it.circuit==null)it.homerun=false;refresh();}},el('option',{value:'',text:'No circuit'}),circOpts());
       cs.value=it.circuit==null?'':String(it.circuit);
       const vs=el('select',{class:'field','aria-label':'Variant for '+st.label,onchange:e=>{snap();it.sub=e.target.value||null;refresh();}},subOpts(st));
       vs.value=it.sub||'';
       const top=el('div',{class:'top'},stampIcon(st,24),el('b',{text:st.label}));
       if(n>1)top.append(el('button',{class:'x2','aria-label':'Remove '+st.label+' from this box',title:'Remove from this box',onclick:()=>{snap();d.items=d.items.filter(q=>q!==it);S.wires=S.wires.filter(w=>!w.nodes.some(n=>n.i===it.id));refresh();}},'×'));
-      box.append(el('div',{class:'irow'},top,fieldRow('Variant',vs),fieldRow('Circuit',cs)));
+      const hb2=el('button',{class:'btn sm solid','aria-pressed':String(!!it.homerun),disabled:it.circuit==null,title:it.circuit==null?'Put this device on a circuit first':'Mark this device as the homerun for its circuit',style:'justify-self:start',onclick:()=>{snap();it.homerun=!it.homerun;refresh();}},it.homerun?'Marked':'Mark');
+      box.append(el('div',{class:'irow'},top,fieldRow('Variant',vs),fieldRow('Circuit',cs),fieldRow('Homerun',hb2)));
     });
-    const cids=boxCircuits(d),hr0=d.homeruns||[];
-    if(cids.length||hr0.length){
-      const hsec=el('div',{class:'irow'},el('div',{class:'top'},el('b',{text:'Homerun'})));
-      hr0.forEach((cid,idx)=>{
-        const taken=new Set(hr0.filter((_,j)=>j!==idx));
-        const opts=[...new Set([...cids,cid])].filter(x=>x===cid||!taken.has(x));
-        const hs=el('select',{class:'field','aria-label':'Homerun circuit',onchange:e=>{snap();d.homeruns[idx]=+e.target.value;refresh();}},
-          opts.map(x=>{const cc=circ(x);return el('option',{value:String(x),text:cc?cc.num+(cc.name?' · '+cc.name:''):'Deleted circuit'});}));
-        hs.value=String(cid);
-        const rm=el('button',{class:'x2','aria-label':'Remove this homerun ring',title:'Remove this homerun ring',onclick:()=>{snap();d.homeruns.splice(idx,1);refresh();}},'×');
-        hsec.append(el('div',{style:'display:grid;grid-template-columns:minmax(0,1fr) 26px;gap:6px;align-items:center'},hs,rm));
-      });
-      const free=cids.filter(x=>!hr0.includes(x));
-      if(free.length)hsec.append(el('button',{class:'btn sm solid',onclick:()=>{snap();d.homeruns=(d.homeruns||[]).concat([free[0]]);refresh();}},hr0.length?'Add another homerun':'Mark homerun'));
-      box.append(hsec);
-    }
     box.append(el('p',{class:'sub',style:'margin:2px 0 0',text:'With a stamp active, click this box on the plan to add another device to it.'}));
     return;
   }
@@ -981,7 +1004,7 @@ function renderInspector(){
     const all=[...si,...sw],first=all.length?all[0].circuit:null;
     const ms=el('select',{class:'field','aria-label':'Circuit',onchange:e=>{
       if(e.target.value==='mixed')return;
-      snap();const v=e.target.value===''?null:+e.target.value;all.forEach(q=>{q.circuit=v;});refresh();
+      snap();const v=e.target.value===''?null:+e.target.value;all.forEach(q=>{q.circuit=v;if(v==null&&q.homerun)q.homerun=false;});refresh();
     }},el('option',{value:'',text:'No circuit'}),circOpts());
     if(all.every(q=>q.circuit===first))ms.value=first==null?'':String(first);else mixedOpt(ms);
     const label=si.length+' device'+(si.length===1?'':'s')+(sd.length!==si.length?' in '+sd.length+' boxes':'')+(sw.length?', '+sw.length+' wire'+(sw.length===1?'':'s'):'')+' selected';
@@ -1011,7 +1034,7 @@ function renderInspector(){
 function renderTallies(){
   const box=$('#tallies');box.textContent='';
   const items=allItems();
-  if(ui.hl&&!items.some(i=>i.stamp===ui.hl.s&&(ui.hl.sub==null||ui.hl.sub===(i.sub||''))))ui.hl=null;
+  if(ui.hl&&!items.some(hlMatch))ui.hl=null;
   const same=(a,b)=>!!a&&a.s===b.s&&a.sub===b.sub;
   const mk=(h,icon,label,n,cls,title)=>el('button',{class:'trow'+(cls?' '+cls:''),'aria-pressed':String(same(ui.hl,h)),title,onclick:()=>{ui.hl=same(ui.hl,h)?null:h;if(ui.hl)ui.hlCirc=false;refresh();}},
     icon,el('span',{text:label}),el('b',{text:n==null?'':String(n)}));
@@ -1025,6 +1048,8 @@ function renderTallies(){
     if(std>0)box.append(mk({s:st.id,sub:''},el('span'),'Standard',std,'sub','Highlight standard '+st.label.toLowerCase()+' devices'));
     subs.forEach(v=>box.append(mk({s:st.id,sub:v.sb.id},el('span'),v.sb.name+(v.sb.tag?'  ('+v.sb.tag+')':''),v.n,'sub','Highlight '+v.sb.name.toLowerCase()+' '+st.label.toLowerCase()+' devices')));
   });
+  const hn=items.filter(i=>i.homerun).length;
+  if(hn)box.append(mk({s:'@home',sub:null},homeIcon(),'Homeruns',hn,'','Highlight every homerun device'));
 }
 function refresh(){
   renderStamps();renderToolbar();renderCircuits();renderInspector();renderTallies();updHint();draw();save();
@@ -1035,6 +1060,7 @@ document.querySelectorAll('#tools [data-tool]').forEach(b=>b.addEventListener('c
 document.querySelectorAll('[data-dc]').forEach(b=>b.addEventListener('click',()=>{S.opts.devColor=b.dataset.dc;refresh();}));
 document.querySelectorAll('[data-wc]').forEach(b=>b.addEventListener('click',()=>{S.opts.wireColor=b.dataset.wc;refresh();}));
 document.querySelectorAll('[data-ws]').forEach(b=>b.addEventListener('click',()=>{S.opts.arc=b.dataset.ws==='arc';refresh();}));
+document.querySelectorAll('[data-bd]').forEach(b=>b.addEventListener('click',()=>{S.opts.border=b.dataset.bd;refresh();}));
 $('#numTog').addEventListener('click',()=>{S.opts.numbers=!S.opts.numbers;refresh();});
 $('#planName').addEventListener('input',e=>{S.name=e.target.value;save();});
 $('#subsel').addEventListener('change',e=>{ui.sub=e.target.value||null;if(ui.tool!=='stamp'){ui.tool='stamp';ui.draft=null;}refresh();});
